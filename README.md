@@ -192,8 +192,11 @@
   .total-readout{
     margin-top: 16px;
     font-family: 'Space Mono', monospace;
-    font-size: 15px;
+    font-size: 14px;
     color: var(--text-dim);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   .total-readout b{
     background: var(--grad);
@@ -385,7 +388,15 @@
         <input type="number" id="f-g3" placeholder="G3" min="0" max="300">
         <input type="number" id="f-g4" placeholder="G4" min="0" max="300">
       </div>
-      <div class="total-readout">Series total: <b id="f-total">0</b></div>
+
+      <label for="f-handicap">Handicap</label>
+      <input type="number" id="f-handicap" placeholder="0" min="0" value="0">
+
+      <div class="total-readout">
+        <div>Series total (raw): <b id="f-total">0</b></div>
+        <div>Total pins (+ handicap): <b id="f-total-pins">0</b></div>
+        <div>Total pins − lowest game (+ handicap): <b id="f-total-minus-low">0</b></div>
+      </div>
 
       <label for="f-submitted">Submitted (date &amp; time)</label>
       <input type="datetime-local" id="f-submitted">
@@ -492,16 +503,31 @@ async function loadEntries(){
   }catch(e){
     entries = [];
   }
+  // Backfill fields for entries saved before pin-total/handicap tracking existed
+  entries.forEach(e=>{
+    if(typeof e.handicap !== 'number') e.handicap = 0;
+    if(typeof e.totalPins !== 'number' || typeof e.totalMinusLowest !== 'number'){
+      const t = computeTotals(e.games, e.handicap);
+      e.total = t.raw;
+      e.totalPins = t.totalPins;
+      e.totalMinusLowest = t.totalMinusLowest;
+    }
+  });
   renderAll();
   renderBoard();
 }
 
 async function saveEntries(){
   try{
-    await window.storage.set(STORAGE_KEY, JSON.stringify(entries), true);
+    const result = await window.storage.set(STORAGE_KEY, JSON.stringify(entries), true);
+    if(!result){
+      console.error('Storage set returned no result');
+      return false;
+    }
+    return true;
   }catch(e){
     console.error('Storage error', e);
-    alert('Could not save — please try again.');
+    return false;
   }
 }
 
@@ -569,17 +595,33 @@ document.getElementById('change-pw-btn').addEventListener('click', async ()=>{
 });
 
 // Live total
+function computeTotals(games, handicap){
+  const raw = games.reduce((a,b)=>a+b,0);
+  const low = Math.min(...games);
+  const hcp = handicap || 0;
+  return {
+    raw,
+    totalPins: raw + hcp,
+    totalMinusLowest: (raw - low) + hcp,
+  };
+}
+
 function updateTotal(){
   const g = ['f-g1','f-g2','f-g3','f-g4'].map(id => parseInt(document.getElementById(id).value) || 0);
-  document.getElementById('f-total').textContent = g.reduce((a,b)=>a+b,0);
+  const hcp = parseInt(document.getElementById('f-handicap').value) || 0;
+  const t = computeTotals(g, hcp);
+  document.getElementById('f-total').textContent = t.raw;
+  document.getElementById('f-total-pins').textContent = t.totalPins;
+  document.getElementById('f-total-minus-low').textContent = t.totalMinusLowest;
 }
-['f-g1','f-g2','f-g3','f-g4'].forEach(id=>{
+['f-g1','f-g2','f-g3','f-g4','f-handicap'].forEach(id=>{
   document.getElementById(id).addEventListener('input', updateTotal);
 });
 
 function clearForm(){
   document.getElementById('f-name').value = '';
   ['f-g1','f-g2','f-g3','f-g4'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('f-handicap').value = '0';
   document.getElementById('f-submitted').value = '';
   document.getElementById('f-notes').value = '';
   ['c1','c2','c3','c4','c5'].forEach(id => document.getElementById(id).checked = false);
@@ -597,6 +639,9 @@ document.getElementById('save-btn').addEventListener('click', async ()=>{
   if(games.some(g => isNaN(g))){ alert('Enter all 4 game scores.'); return; }
   if(games.some(g => g < 0 || g > 300)){ alert('Game scores must be between 0 and 300.'); return; }
 
+  const handicap = parseInt(document.getElementById('f-handicap').value) || 0;
+  if(handicap < 0){ alert('Handicap can\'t be negative.'); return; }
+
   if(!editingId){
     const dupe = entries.some(e => e.name.toLowerCase() === name.toLowerCase());
     if(dupe && !confirm(`"${name}" already has a submission logged. Save this as an additional entry anyway?`)) return;
@@ -610,31 +655,62 @@ document.getElementById('save-btn').addEventListener('click', async ()=>{
     onTime: document.getElementById('c5').checked,
   };
 
+  const totals = computeTotals(games, handicap);
+  const submitted = document.getElementById('f-submitted').value || null;
+  const notes = document.getElementById('f-notes').value.trim();
+
+  // Snapshot so we can roll back if the write genuinely fails
+  const previousEntries = JSON.parse(JSON.stringify(entries));
+  const saveBtn = document.getElementById('save-btn');
+  const wasEditing = editingId;
+
   if(editingId){
     const entry = entries.find(x => x.id === editingId);
     entry.name = name;
     entry.games = games;
-    entry.total = games.reduce((a,b)=>a+b,0);
-    entry.submitted = document.getElementById('f-submitted').value || null;
-    entry.notes = document.getElementById('f-notes').value.trim();
+    entry.handicap = handicap;
+    entry.total = totals.raw;
+    entry.totalPins = totals.totalPins;
+    entry.totalMinusLowest = totals.totalMinusLowest;
+    entry.submitted = submitted;
+    entry.notes = notes;
     entry.checklist = checklist;
-    editingId = null;
-    document.getElementById('save-btn').textContent = 'Save Submission';
   } else {
     entries.push({
       id: uid(),
       name,
       games,
-      total: games.reduce((a,b)=>a+b,0),
-      submitted: document.getElementById('f-submitted').value || null,
-      notes: document.getElementById('f-notes').value.trim(),
+      handicap,
+      total: totals.raw,
+      totalPins: totals.totalPins,
+      totalMinusLowest: totals.totalMinusLowest,
+      submitted,
+      notes,
       checklist,
       status: 'pending',
       logged: new Date().toISOString(),
     });
   }
 
-  await saveEntries();
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving...';
+
+  let ok = await saveEntries();
+  if(!ok){
+    ok = await saveEntries(); // one retry — transient network/rate-limit hiccups are common
+  }
+
+  saveBtn.disabled = false;
+
+  if(!ok){
+    entries = previousEntries; // roll back so the UI never shows a save that didn't happen
+    saveBtn.textContent = wasEditing ? 'Update Submission' : 'Save Submission';
+    alert('This submission could NOT be saved after two attempts. Nothing was recorded — please try again.');
+    return;
+  }
+
+  editingId = null;
+  saveBtn.textContent = 'Save Submission';
   clearForm();
   renderAll();
   renderBoard();
@@ -660,14 +736,16 @@ function renderAll(){
   wrap.innerHTML = `
     <table>
       <thead>
-        <tr><th>Bowler</th><th>Games</th><th>Total</th><th>Checklist</th><th>Status</th><th>Notes</th><th></th></tr>
+        <tr><th>Bowler</th><th>Games</th><th>Hcp</th><th>Total Pins</th><th>Total − Low</th><th>Checklist</th><th>Status</th><th>Notes</th><th></th></tr>
       </thead>
       <tbody>
         ${sorted.map(e => `
           <tr>
             <td data-label="Bowler">${escapeHtml(e.name)}</td>
             <td data-label="Games">${e.games.join(' · ')}</td>
-            <td data-label="Total"><b>${e.total}</b></td>
+            <td data-label="Hcp">${e.handicap || 0}</td>
+            <td data-label="Total Pins"><b>${e.totalPins}</b></td>
+            <td data-label="Total − Low">${e.totalMinusLowest}</td>
             <td data-label="Checklist">${Object.values(e.checklist).filter(Boolean).length}/5</td>
             <td data-label="Status">
               <select class="status-select" data-id="${e.id}">
@@ -692,16 +770,40 @@ function renderAll(){
   wrap.querySelectorAll('.status-select').forEach(sel=>{
     sel.addEventListener('change', async ()=>{
       const entry = entries.find(x => x.id === sel.dataset.id);
+      const previousStatus = entry.status;
       entry.status = sel.value;
-      await saveEntries();
+      sel.disabled = true;
+
+      let ok = await saveEntries();
+      if(!ok) ok = await saveEntries();
+
+      sel.disabled = false;
+
+      if(!ok){
+        entry.status = previousStatus;
+        sel.value = previousStatus;
+        alert('Status change could NOT be saved after two attempts. Reverted — please try again.');
+        return;
+      }
       renderBoard();
     });
   });
   wrap.querySelectorAll('.delete-btn').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       if(!confirm('Delete this submission?')) return;
+      const previousEntries = JSON.parse(JSON.stringify(entries));
       entries = entries.filter(x => x.id !== btn.dataset.id);
-      await saveEntries();
+      btn.disabled = true;
+
+      let ok = await saveEntries();
+      if(!ok) ok = await saveEntries();
+
+      if(!ok){
+        entries = previousEntries;
+        alert('Delete could NOT be saved after two attempts. Nothing was removed — please try again.');
+        renderAll();
+        return;
+      }
       renderAll();
       renderBoard();
     });
@@ -715,6 +817,7 @@ function renderAll(){
       document.getElementById('f-g2').value = entry.games[1];
       document.getElementById('f-g3').value = entry.games[2];
       document.getElementById('f-g4').value = entry.games[3];
+      document.getElementById('f-handicap').value = entry.handicap || 0;
       document.getElementById('f-submitted').value = entry.submitted || '';
       document.getElementById('f-notes').value = entry.notes || '';
       document.getElementById('c1').checked = entry.checklist.papers;
@@ -736,9 +839,9 @@ document.getElementById('search-box').addEventListener('input', (e)=>{
 
 document.getElementById('export-btn').addEventListener('click', ()=>{
   if(entries.length === 0){ alert('No submissions to export.'); return; }
-  const header = ['Name','Game 1','Game 2','Game 3','Game 4','Total','Status','Submitted','Notes'];
+  const header = ['Name','Game 1','Game 2','Game 3','Game 4','Handicap','Raw Total','Total Pins','Total Pins - Lowest','Status','Submitted','Notes'];
   const rows = entries.map(e => [
-    e.name, e.games[0], e.games[1], e.games[2], e.games[3], e.total,
+    e.name, e.games[0], e.games[1], e.games[2], e.games[3], e.handicap || 0, e.total, e.totalPins, e.totalMinusLowest,
     statusLabel(e.status), e.submitted || '', (e.notes||'').replace(/"/g,'""')
   ]);
   const csv = [header, ...rows]
@@ -753,26 +856,48 @@ document.getElementById('export-btn').addEventListener('click', ()=>{
   URL.revokeObjectURL(url);
 });
 
+let boardSort = 'totalPins'; // 'totalPins' or 'totalMinusLowest'
+
 function renderBoard(){
   const wrap = document.getElementById('board-wrap');
-  const verified = entries.filter(e => e.status === 'verified').sort((a,b) => b.total - a.total);
+  const verified = entries.filter(e => e.status === 'verified').sort((a,b) => b[boardSort] - a[boardSort]);
+
+  const toggle = `
+    <div class="row" style="margin-top:0; margin-bottom:18px;">
+      <button class="btn btn-small ${boardSort==='totalPins' ? 'btn-primary' : 'btn-ghost'}" id="sort-total-pins">Total Pins</button>
+      <button class="btn btn-small ${boardSort==='totalMinusLowest' ? 'btn-primary' : 'btn-ghost'}" id="sort-total-minus-low">Total − Lowest Game</button>
+    </div>`;
+
   if(verified.length === 0){
-    wrap.innerHTML = '<div class="empty">No verified scores yet. Verify submissions in the "All Submissions" tab to populate standings.</div>';
+    wrap.innerHTML = toggle + '<div class="empty">No verified scores yet. Verify submissions in the "All Submissions" tab to populate standings.</div>';
+    wireBoardToggle();
     return;
   }
   const medalClass = i => i===0?'gold':i===1?'silver':i===2?'bronze':'';
-  wrap.innerHTML = `<div class="rank-list">
+  wrap.innerHTML = toggle + `<div class="rank-list">
     ${verified.map((e,i)=>`
       <div class="rank-row ${medalClass(i)}">
         <div class="rank-num">#${i+1}</div>
         <div>
           <div class="rank-name">${escapeHtml(e.name)}</div>
-          <div class="rank-games">${e.games.join(' · ')}</div>
+          <div class="rank-games">${e.games.join(' · ')}${e.handicap ? ' · Hcp ' + e.handicap : ''} · ${boardSort==='totalPins' ? 'Total − Low: ' + e.totalMinusLowest : 'Total Pins: ' + e.totalPins}</div>
         </div>
-        <div class="rank-total">${e.total}</div>
+        <div class="rank-total">${e[boardSort]}</div>
       </div>
     `).join('')}
   </div>`;
+  wireBoardToggle();
+}
+
+function wireBoardToggle(){
+  document.getElementById('sort-total-pins').addEventListener('click', ()=>{
+    boardSort = 'totalPins';
+    renderBoard();
+  });
+  document.getElementById('sort-total-minus-low').addEventListener('click', ()=>{
+    boardSort = 'totalMinusLowest';
+    renderBoard();
+  });
 }
 
 function escapeHtml(str){
