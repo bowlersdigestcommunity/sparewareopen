@@ -487,19 +487,19 @@ let pendingTab = null;
 
 function uid(){ return 'e' + Date.now() + Math.random().toString(16).slice(2,6); }
 
-async function loadPassword(){
+function loadPassword(){
   try{
-    const res = await window.storage.get(PW_KEY, true);
-    adminPassword = res ? res.value : DEFAULT_PASSWORD;
+    const res = localStorage.getItem(PW_KEY);
+    adminPassword = res ? res : DEFAULT_PASSWORD;
   }catch(e){
     adminPassword = DEFAULT_PASSWORD;
   }
 }
 
-async function loadEntries(){
+function loadEntries(){
   try{
-    const res = await window.storage.get(STORAGE_KEY, true);
-    entries = res ? JSON.parse(res.value) : [];
+    const res = localStorage.getItem(STORAGE_KEY);
+    entries = res ? JSON.parse(res) : [];
   }catch(e){
     entries = [];
   }
@@ -517,13 +517,9 @@ async function loadEntries(){
   renderBoard();
 }
 
-async function saveEntries(){
+function saveEntries(){
   try{
-    const result = await window.storage.set(STORAGE_KEY, JSON.stringify(entries), true);
-    if(!result){
-      console.error('Storage set returned no result');
-      return false;
-    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
     return true;
   }catch(e){
     console.error('Storage error', e);
@@ -578,7 +574,7 @@ document.getElementById('auth-cancel').addEventListener('click', ()=>{
   hideAuthOverlay();
 });
 
-document.getElementById('change-pw-btn').addEventListener('click', async ()=>{
+document.getElementById('change-pw-btn').addEventListener('click', ()=>{
   if(!isAuthed){ alert('Unlock the admin area first before changing the password.'); return; }
   const current = prompt('Enter the current password to confirm:');
   if(current === null) return;
@@ -587,7 +583,7 @@ document.getElementById('change-pw-btn').addEventListener('click', async ()=>{
   if(!next) return;
   adminPassword = next;
   try{
-    await window.storage.set(PW_KEY, adminPassword, true);
+    localStorage.setItem(PW_KEY, adminPassword);
     alert('Password updated.');
   }catch(e){
     alert('Could not save the new password — please try again.');
@@ -631,7 +627,7 @@ function clearForm(){
 }
 document.getElementById('clear-btn').addEventListener('click', clearForm);
 
-document.getElementById('save-btn').addEventListener('click', async ()=>{
+document.getElementById('save-btn').addEventListener('click', ()=>{
   const name = document.getElementById('f-name').value.trim();
   if(!name){ alert('Enter a bowler name or Discord handle.'); return; }
 
@@ -640,7 +636,7 @@ document.getElementById('save-btn').addEventListener('click', async ()=>{
   if(games.some(g => g < 0 || g > 300)){ alert('Game scores must be between 0 and 300.'); return; }
 
   const handicap = parseInt(document.getElementById('f-handicap').value) || 0;
-  if(handicap < 0){ alert('Handicap can\'t be negative.'); return; }
+  if(handicap < 0){ alert("Handicap can't be negative."); return; }
 
   if(!editingId){
     const dupe = entries.some(e => e.name.toLowerCase() === name.toLowerCase());
@@ -695,17 +691,14 @@ document.getElementById('save-btn').addEventListener('click', async ()=>{
   saveBtn.disabled = true;
   saveBtn.textContent = 'Saving...';
 
-  let ok = await saveEntries();
-  if(!ok){
-    ok = await saveEntries(); // one retry — transient network/rate-limit hiccups are common
-  }
+  let ok = saveEntries();
 
   saveBtn.disabled = false;
 
   if(!ok){
     entries = previousEntries; // roll back so the UI never shows a save that didn't happen
     saveBtn.textContent = wasEditing ? 'Update Submission' : 'Save Submission';
-    alert('This submission could NOT be saved after two attempts. Nothing was recorded — please try again.');
+    alert('This submission could NOT be saved. Nothing was recorded — please try again.');
     return;
   }
 
@@ -768,39 +761,37 @@ function renderAll(){
   `;
 
   wrap.querySelectorAll('.status-select').forEach(sel=>{
-    sel.addEventListener('change', async ()=>{
+    sel.addEventListener('change', ()=>{
       const entry = entries.find(x => x.id === sel.dataset.id);
       const previousStatus = entry.status;
       entry.status = sel.value;
       sel.disabled = true;
 
-      let ok = await saveEntries();
-      if(!ok) ok = await saveEntries();
+      let ok = saveEntries();
 
       sel.disabled = false;
 
       if(!ok){
         entry.status = previousStatus;
         sel.value = previousStatus;
-        alert('Status change could NOT be saved after two attempts. Reverted — please try again.');
+        alert('Status change could NOT be saved. Reverted — please try again.');
         return;
       }
       renderBoard();
     });
   });
   wrap.querySelectorAll('.delete-btn').forEach(btn=>{
-    btn.addEventListener('click', async ()=>{
+    btn.addEventListener('click', ()=>{
       if(!confirm('Delete this submission?')) return;
       const previousEntries = JSON.parse(JSON.stringify(entries));
       entries = entries.filter(x => x.id !== btn.dataset.id);
       btn.disabled = true;
 
-      let ok = await saveEntries();
-      if(!ok) ok = await saveEntries();
+      let ok = saveEntries();
 
       if(!ok){
         entries = previousEntries;
-        alert('Delete could NOT be saved after two attempts. Nothing was removed — please try again.');
+        alert('Delete could NOT be saved. Nothing was removed — please try again.');
         renderAll();
         return;
       }
