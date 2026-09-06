@@ -554,7 +554,39 @@
   </div>
 </div>
 
+<!-- Firebase (shared cloud storage so entries sync across devices) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script>
+// ====== FIREBASE SETUP — do this once ======
+// 1. https://console.firebase.google.com/ -> Add project (free Spark plan is enough).
+// 2. Left sidebar: Build > Realtime Database > Create Database (any region) > start in "test mode".
+// 3. Rules tab of that database, replace with: {"rules": {".read": true, ".write": true}} -> Publish.
+//    (Anyone with the URL can then read/write directly to the DB. Fine for a casual scoreboard —
+//     the admin password below is just a UI gate either way, not real security.)
+// 4. Gear icon (top left) > Project settings > General tab > "Your apps" > click the </> (Web) icon
+//    -> register an app (no need to check "Firebase Hosting") -> copy the firebaseConfig object shown
+//    and paste its values in below.
+const firebaseConfig = {
+  apiKey: "AIzaSyAKSDpCDYS3QeMIbnBq4lqK6XJMK339UPc",
+  authDomain: "spareware-open.firebaseapp.com",
+  databaseURL: "https://spareware-open-default-rtdb.firebaseio.com",
+  projectId: "spareware-open",
+  storageBucket: "spareware-open.firebasestorage.app",
+  messagingSenderId: "547346055493",
+  appId: "1:547346055493:web:198b374c8d6c07ee2d7e2c",
+  measurementId: "G-5P3NM20CT2"
+};
+const firebaseReady = !firebaseConfig.apiKey.startsWith('YOUR_');
+let db, entriesRef;
+if(firebaseReady){
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+  entriesRef = db.ref('entries');
+} else {
+  console.warn('Firebase config not filled in yet — entries will stay local to this device. See the comment block above.');
+}
+
 const STORAGE_KEY = 'spare-ware-open:entries';
 const PW_KEY = 'spare-ware-open:admin-password';
 const DEFAULT_PASSWORD = 'sparewareopen';
@@ -576,14 +608,8 @@ function loadPassword(){
   }
 }
 
-function loadEntries(){
-  try{
-    const res = localStorage.getItem(STORAGE_KEY);
-    entries = res ? JSON.parse(res) : [];
-  }catch(e){
-    entries = [];
-  }
-  entries.forEach(e=>{
+function normalizeEntries(list){
+  list.forEach(e=>{
     if(typeof e.handicap !== 'number') e.handicap = 0;
     if(typeof e.totalPins !== 'number' || typeof e.totalMinusLowest !== 'number'){
       const t = computeTotals(e.games, e.handicap);
@@ -592,17 +618,54 @@ function loadEntries(){
       e.totalMinusLowest = t.totalMinusLowest;
     }
   });
-  renderAll();
-  renderBoard();
+  return list;
 }
 
-function saveEntries(){
+function entriesToObject(list){
+  const obj = {};
+  list.forEach(e => obj[e.id] = e);
+  return obj;
+}
+
+function loadEntries(){
+  if(firebaseReady){
+    // Live sync: any device's write shows up here for every other open tab/device.
+    entriesRef.on('value', snapshot => {
+      const val = snapshot.val();
+      entries = normalizeEntries(val ? Object.values(val) : []);
+      renderAll();
+      renderBoard();
+    }, err => {
+      console.error('Firebase read error', err);
+      alert('Could not connect to the shared database. Check your connection and reload.');
+    });
+  } else {
+    try{
+      const res = localStorage.getItem(STORAGE_KEY);
+      entries = normalizeEntries(res ? JSON.parse(res) : []);
+    }catch(e){
+      entries = [];
+    }
+    renderAll();
+    renderBoard();
+  }
+}
+
+// Writes a full entries list to shared storage. Returns a Promise<boolean>.
+function saveEntries(list){
+  const toSave = list || entries;
+  if(firebaseReady){
+    return entriesRef.set(entriesToObject(toSave))
+      .then(()=> true)
+      .catch(e=>{ console.error('Firebase write error', e); return false; });
+  }
   try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
-    return true;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    entries = toSave;
+    return Promise.resolve(true);
   }catch(e){
     console.error('Storage error', e);
-    return false;
+    return Promise.resolve(false);
   }
 }
 
@@ -705,7 +768,7 @@ function clearForm(){
 }
 document.getElementById('clear-btn').addEventListener('click', clearForm);
 
-document.getElementById('save-btn').addEventListener('click', ()=>{
+document.getElementById('save-btn').addEventListener('click', async ()=>{
   const name = document.getElementById('f-name').value.trim();
   if(!name){ alert('Enter a bowler name or Discord handle.'); return; }
 
@@ -733,23 +796,18 @@ document.getElementById('save-btn').addEventListener('click', ()=>{
   const submitted = document.getElementById('f-submitted').value || null;
   const notes = document.getElementById('f-notes').value.trim();
 
-  const previousEntries = JSON.parse(JSON.stringify(entries));
   const saveBtn = document.getElementById('save-btn');
   const wasEditing = editingId;
 
+  let nextEntries;
   if(editingId){
-    const entry = entries.find(x => x.id === editingId);
-    entry.name = name;
-    entry.games = games;
-    entry.handicap = handicap;
-    entry.total = totals.raw;
-    entry.totalPins = totals.totalPins;
-    entry.totalMinusLowest = totals.totalMinusLowest;
-    entry.submitted = submitted;
-    entry.notes = notes;
-    entry.checklist = checklist;
+    nextEntries = entries.map(e => e.id === editingId ? {
+      ...e, name, games, handicap,
+      total: totals.raw, totalPins: totals.totalPins, totalMinusLowest: totals.totalMinusLowest,
+      submitted, notes, checklist
+    } : e);
   } else {
-    entries.push({
+    nextEntries = [...entries, {
       id: uid(),
       name,
       games,
@@ -762,23 +820,23 @@ document.getElementById('save-btn').addEventListener('click', ()=>{
       checklist,
       status: 'pending',
       logged: new Date().toISOString(),
-    });
+    }];
   }
 
   saveBtn.disabled = true;
   saveBtn.textContent = 'Saving...';
 
-  let ok = saveEntries();
+  const ok = await saveEntries(nextEntries);
 
   saveBtn.disabled = false;
 
   if(!ok){
-    entries = previousEntries;
     saveBtn.textContent = wasEditing ? 'Update Submission' : 'Save Submission';
     alert('This submission could NOT be saved. Nothing was recorded — please try again.');
     return;
   }
 
+  entries = nextEntries;
   editingId = null;
   saveBtn.textContent = 'Save Submission';
   clearForm();
@@ -838,40 +896,37 @@ function renderAll(){
   `;
 
   wrap.querySelectorAll('.status-select').forEach(sel=>{
-    sel.addEventListener('change', ()=>{
-      const entry = entries.find(x => x.id === sel.dataset.id);
-      const previousStatus = entry.status;
-      entry.status = sel.value;
+    sel.addEventListener('change', async ()=>{
+      const previousStatus = entries.find(x => x.id === sel.dataset.id).status;
+      const nextEntries = entries.map(e => e.id === sel.dataset.id ? {...e, status: sel.value} : e);
       sel.disabled = true;
 
-      let ok = saveEntries();
+      const ok = await saveEntries(nextEntries);
 
       sel.disabled = false;
 
       if(!ok){
-        entry.status = previousStatus;
         sel.value = previousStatus;
         alert('Status change could NOT be saved. Reverted — please try again.');
         return;
       }
+      entries = nextEntries;
       renderBoard();
     });
   });
   wrap.querySelectorAll('.delete-btn').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
+    btn.addEventListener('click', async ()=>{
       if(!confirm('Delete this submission?')) return;
-      const previousEntries = JSON.parse(JSON.stringify(entries));
-      entries = entries.filter(x => x.id !== btn.dataset.id);
+      const nextEntries = entries.filter(x => x.id !== btn.dataset.id);
       btn.disabled = true;
 
-      let ok = saveEntries();
+      const ok = await saveEntries(nextEntries);
 
       if(!ok){
-        entries = previousEntries;
         alert('Delete could NOT be saved. Nothing was removed — please try again.');
-        renderAll();
         return;
       }
+      entries = nextEntries;
       renderAll();
       renderBoard();
     });
